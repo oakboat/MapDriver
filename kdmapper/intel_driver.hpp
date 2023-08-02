@@ -10,66 +10,27 @@
 #include "utils.hpp"
 #include <assert.h>
 
-#define IOCTL_BASE 0x800
-#define IOCTL_CODE(i) CTL_CODE(FILE_DEVICE_UNKNOWN,IOCTL_BASE+i,METHOD_BUFFERED,FILE_ANY_ACCESS)
-#define IOCTL_COPY IOCTL_CODE(1)
-#define IOCTL_ALLOC IOCTL_CODE(2)
-#define IOCTL_FREE IOCTL_CODE(3)
-#define IOCTL_CALL_DRIVER IOCTL_CODE(4)
-
 namespace intel_driver
 {
 	extern char driver_name[100]; //"iqvw64e.sys"
 	constexpr uint32_t ioctl1 = 0x80862007;
 	constexpr DWORD iqvw64e_timestamp = 0x5284EAC3;
 	extern ULONG64 ntoskrnlAddr;
-
-	typedef struct _COPY_MEMORY_BUFFER_INFO
+	
+	typedef struct WRIO
 	{
-		uint64_t case_number;
-		uint64_t reserved;
 		uint64_t source;
 		uint64_t destination;
 		uint64_t length;
-	}COPY_MEMORY_BUFFER_INFO, * PCOPY_MEMORY_BUFFER_INFO;
-
-	typedef struct _FILL_MEMORY_BUFFER_INFO
-	{
-		uint64_t case_number;
-		uint64_t reserved1;
-		uint32_t value;
-		uint32_t reserved2;
-		uint64_t destination;
-		uint64_t length;
-	}FILL_MEMORY_BUFFER_INFO, * PFILL_MEMORY_BUFFER_INFO;
-
-	typedef struct _GET_PHYS_ADDRESS_BUFFER_INFO
-	{
-		uint64_t case_number;
-		uint64_t reserved;
-		uint64_t return_physical_address;
 		uint64_t address_to_translate;
-	}GET_PHYS_ADDRESS_BUFFER_INFO, * PGET_PHYS_ADDRESS_BUFFER_INFO;
-
-	typedef struct _MAP_IO_SPACE_BUFFER_INFO
-	{
-		uint64_t case_number;
-		uint64_t reserved;
-		uint64_t return_value;
-		uint64_t return_virtual_address;
+		uint64_t return_physical_address;
 		uint64_t physical_address_to_map;
-		uint32_t size;
-	}MAP_IO_SPACE_BUFFER_INFO, * PMAP_IO_SPACE_BUFFER_INFO;
-
-	typedef struct _UNMAP_IO_SPACE_BUFFER_INFO
-	{
-		uint64_t case_number;
-		uint64_t reserved1;
-		uint64_t reserved2;
+		uint64_t return_virtual_address;
 		uint64_t virt_address;
-		uint64_t reserved3;
+		uint32_t value;
+		uint32_t size;
 		uint32_t number_of_bytes;
-	}UNMAP_IO_SPACE_BUFFER_INFO, * PUNMAP_IO_SPACE_BUFFER_INFO;
+	}WRIO, * PWRIO;
 
 	typedef struct _RTL_BALANCED_LINKS {
 		struct _RTL_BALANCED_LINKS* Parent;
@@ -111,19 +72,6 @@ namespace intel_driver
 		ULONG CertHash[5];
 	} HashBucketEntry, * PHashBucketEntry;
 
-	typedef struct WRIO
-	{
-		uint64_t source;
-		uint64_t destination;
-		uint64_t length;
-		uint64_t allocated_pool;
-		uint64_t pool_type;
-		ULONG pool_tag;
-		NTSTATUS out_result;
-		ULONG64 param1;
-		ULONG64 param2;
-	}WRIO, * PWRIO;
-
 	bool ClearPiDDBCacheTable(HANDLE device_handle);
 	bool ExAcquireResourceExclusiveLite(HANDLE device_handle, PVOID Resource, BOOLEAN wait);
 	bool ExReleaseResourceLite(HANDLE device_handle, PVOID Resource);
@@ -164,8 +112,6 @@ namespace intel_driver
 	bool ClearMmUnloadedDrivers(HANDLE device_handle);
 	std::wstring GetDriverNameW();
 	std::wstring GetDriverPath();
-
-	bool CallDriverFunction(HANDLE device_handle, NTSTATUS* out_result, uint64_t kernel_function_address, ULONG64 param1, ULONG64 param2);
 
 	template<typename T, typename ...A>
 	bool CallKernelFunction(HANDLE device_handle, T* out_result, uint64_t kernel_function_address, const A ...arguments) {

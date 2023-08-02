@@ -7,22 +7,25 @@
 #define IOCTL_BASE 0x800
 #define IOCTL_CODE(i) CTL_CODE(FILE_DEVICE_UNKNOWN,IOCTL_BASE+i,METHOD_BUFFERED,FILE_ANY_ACCESS)
 
-#define IOCTL_COPY IOCTL_CODE(1)
-#define IOCTL_ALLOC IOCTL_CODE(2)
-#define IOCTL_FREE IOCTL_CODE(3)
-#define IOCTL_CALL_DRIVER IOCTL_CODE(4)
+#define IOCTL_COPY_MEMORY IOCTL_CODE(1)
+#define IOCTL_FILL_MEMORY IOCTL_CODE(2)
+#define IOCTL_GET_PHYS_ADDRESS IOCTL_CODE(3)
+#define IOCTL_MAP_IO_SPACE IOCTL_CODE(4)
+#define IOCTL_UNMAP_IO_SPACE IOCTL_CODE(5)
 
 typedef struct WRIO
 {
 	uint64_t source;
 	uint64_t destination;
 	uint64_t length;
-	uint64_t allocated_pool;
-	uint64_t pool_type;
-	ULONG pool_tag;
-	NTSTATUS out_result;
-	ULONG64 param1;
-	ULONG64 param2;
+	uint64_t address_to_translate;
+	uint64_t return_physical_address;
+	uint64_t physical_address_to_map;
+	uint64_t return_virtual_address;
+	uint64_t virt_address;
+	uint32_t value;
+	uint32_t size;
+	uint32_t number_of_bytes;
 }WRIO, * PWRIO;
 
 NTSTATUS CreateMyDevice(IN PDRIVER_OBJECT pDriverObject) {
@@ -94,34 +97,39 @@ NTSTATUS ControlDispatchRoutine(IN PDEVICE_OBJECT pDevobj, IN PIRP pIrp) {
 
 	switch (IoControlCode)
 	{
-	case IOCTL_COPY:
+	case IOCTL_COPY_MEMORY:
 	{
 		KdPrint(("复制内存"));
 		RtlCopyMemory((void*)pIoBuffer->destination, (void*)pIoBuffer->source, pIoBuffer->length);
 	}
 	break;
-	case IOCTL_ALLOC:
+	case IOCTL_FILL_MEMORY:
 	{
-		KdPrint(("分配内存"));
-		pIoBuffer->destination = (uint64_t)ExAllocatePoolWithTag((POOL_TYPE)pIoBuffer->pool_type, pIoBuffer->length,
-			pIoBuffer->pool_tag);
-		KdPrint(("分配成功 %p", pIoBuffer->destination));
+		KdPrint(("填充内存"));
+		RtlFillMemory((void*)pIoBuffer->destination, pIoBuffer->length, pIoBuffer->value);
+	}
+	break;
+	case IOCTL_GET_PHYS_ADDRESS:
+	{
+		KdPrint(("获取物理地址内存"));
+		pIoBuffer->return_physical_address = (uint64_t)MmGetPhysicalAddress((void*)pIoBuffer->address_to_translate).QuadPart;
 		info = sizeof(WRIO);
 	}
 	break;
-	case IOCTL_FREE:
+	case IOCTL_MAP_IO_SPACE:
 	{
-		KdPrint(("释放内存"));
-		ExFreePool((PVOID)pIoBuffer->destination);
+		KdPrint(("映射内存"));
+		PHYSICAL_ADDRESS physicalAddress{ 0 };
+		physicalAddress.QuadPart = pIoBuffer->physical_address_to_map;
+
+		pIoBuffer->return_virtual_address = (uint64_t)MmMapIoSpace(physicalAddress, pIoBuffer->size, MmNonCached);
+		info = sizeof(WRIO);
 	}
 	break;
-	case IOCTL_CALL_DRIVER:
+	case IOCTL_UNMAP_IO_SPACE:
 	{
-		KdPrint(("调用驱动函数"));
-		using FunctionFn = NTSTATUS(__stdcall*)(ULONG64, ULONG64);
-		auto Function = reinterpret_cast<FunctionFn>(pIoBuffer->destination);
-		pIoBuffer->out_result = Function(pIoBuffer->param1, pIoBuffer->param2);
-		info = sizeof(WRIO);
+		KdPrint(("取消映射内存"));
+		MmUnmapIoSpace((void*)pIoBuffer->virt_address, pIoBuffer->number_of_bytes);
 	}
 	break;
 	default:
